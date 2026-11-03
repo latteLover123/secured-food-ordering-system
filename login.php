@@ -1,5 +1,5 @@
 <?php
-// login.php - Primary Authentication Gateway
+// login.php - Primary Authentication Gateway (Integrated with Person 2 Rate Limiter)
 declare(strict_types=1);
 
 // Temporarily enable during development to catch errors:
@@ -8,50 +8,58 @@ error_reporting(E_ALL);
 
 require_once 'session.php';
 require_once 'db.php'; // Person 2's database wrapper
+require_once 'rate_limiter.php'; // [PERSON 2 ADDED THIS]
 
 $loginError = '';
+
+// [PERSON 2 ADDED THIS] Initialize the RateLimiter
+$limiter = new RateLimiter($pdo);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
+    $ip_address = $_SERVER['REMOTE_ADDR']; // [PERSON 2 ADDED THIS]
 
     if (!empty($username) && !empty($password)) {
-        // Query user record using prepared statement to prevent SQL injection
-        $stmt = $pdo->prepare("SELECT id, username, password_hash, mfa_enabled FROM users WHERE username = ?");
-        $stmt->execute([$username]);
-        $user = $stmt->fetch();
-
-        // Constant-time password verification against Argon2id hash
-        if ($user && password_verify($password, $user['password_hash'])) {
-            
-            // Mitigate CWE-384: Regenerate session ID upon primary credential match
-            session_regenerate_id(true);
-
-            if (!empty($user['mfa_enabled'])) {
-                // Set intermediate isolation state
-                $_SESSION['mfa_pending_uid']  = (int)$user['id'];
-                $_SESSION['mfa_pending_user'] = $user['username'];
-                $_SESSION['authenticated']    = false;
-
-                // Generate cryptographically secure 6-digit OTP
-                $rawOtp = (string)random_int(100000, 999999);
-                $hashedOtp = hash('sha256', $rawOtp);
-                $expiryTimestamp = date('Y-m-d H:i:s', time() + 300); // 5-minute expiry
-
-                // Add right after generating $rawOtp in login.php:
-                $_SESSION['demo_otp'] = $rawOtp; // Temporary display token for local evaluation
-
-                // Store hashed OTP in database
-                $update = $pdo->prepare("UPDATE users SET mfa_code = ?, mfa_expiry = ? WHERE id = ?");
-                $update->execute([$hashedOtp, $expiryTimestamp, $user['id']]);
-
-                // For testing/demonstration purposes, display code or dispatch to MFA
-                header("Location: mfa_verify.php");
-                exit();
-            }
+        
+        // [PERSON 2 ADDED THIS BLOCK] Check if locked out BEFORE hitting the database
+        if ($limiter->isLockedOut($username)) {
+            $loginError = "Akaun disekat sementara kerana terlalu banyak cubaan gagal. Sila cuba selepas 15 minit.";
         } else {
-            // Generic error message suppresses account enumeration (CWE-209 / OWASP A07)
-            $loginError = "Invalid username or password entered.";
+            // --- KOD ASAL PERSON 1 BERMULA ---
+            $stmt = $pdo->prepare("SELECT id, username, password_hash, mfa_enabled FROM users WHERE username = ?");
+            $stmt->execute([$username]);
+            $user = $stmt->fetch();
+
+            if ($user && password_verify($password, $user['password_hash'])) {
+                
+                // [PERSON 2 ADDED THIS] Clear failed attempts upon successful login
+                $limiter->clearFailures($username);
+
+                session_regenerate_id(true);
+
+                if (!empty($user['mfa_enabled'])) {
+                    $_SESSION['mfa_pending_uid']  = (int)$user['id'];
+                    $_SESSION['mfa_pending_user'] = $user['username'];
+                    $_SESSION['authenticated']    = false;
+
+                    $rawOtp = (string)random_int(100000, 999999);
+                    $hashedOtp = hash('sha256', $rawOtp);
+                    $expiryTimestamp = date('Y-m-d H:i:s', time() + 300); 
+                    $_SESSION['demo_otp'] = $rawOtp; 
+
+                    $update = $pdo->prepare("UPDATE users SET mfa_code = ?, mfa_expiry = ? WHERE id = ?");
+                    $update->execute([$hashedOtp, $expiryTimestamp, $user['id']]);
+
+                    header("Location: mfa_verify.php");
+                    exit();
+                }
+            } else {
+                // [PERSON 2 ADDED THIS] Record failure if password is wrong
+                $limiter->recordFailure($username, $ip_address);
+                $loginError = "Invalid username or password entered.";
+            }
+            // --- KOD ASAL PERSON 1 TAMAT ---
         }
     } else {
         $loginError = "Please fill in all required fields.";
@@ -84,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <h2>System Login</h2>
 
         <?php if (!empty($loginError)): ?>
-            <div class="error"><?= htmlspecialchars($loginError, ENT_QUOTES, 'UTF-8'); ?></div>
+            <div class="error"><?= htmlspecialchars($loginError, ENT_QUOTES, 'UTF-8') ?></div>
         <?php endif; ?>
 
         <form method="POST" action="login.php">
