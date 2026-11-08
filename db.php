@@ -3,8 +3,8 @@
 declare(strict_types=1);
 
 $host    = '127.0.0.1';
-$port    = '3307'; // Add your MariaDB port here
-$db      = 'secured_system_db';
+$port    = '3306'; // Add your MariaDB port here
+$db = 'schema.sql';
 $user    = 'root';
 $pass    = ''; // WampServer default root password is empty
 $charset = 'utf8mb4';
